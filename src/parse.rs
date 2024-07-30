@@ -13,6 +13,7 @@ pub struct Config {
     pub move_folders: bool,
     pub sync_files: bool,
     pub delete: bool,
+    pub checksum: bool,
 }
 
 impl Default for Config {
@@ -26,6 +27,7 @@ impl Default for Config {
             move_folders: false, // TODO: change this to true when all is ready
             sync_files: false,   // TODO: change this to true when all is ready
             delete: false,       // TODO: change this to true when all is ready
+            checksum: true,
         }
     }
 }
@@ -78,21 +80,38 @@ pub fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn Error>> {
     }
     let mut config = Config::new();
     // first we scan for the "file:..." argument, and apply the config file
+    let mut seen_file = false;
     for arg in args.iter().skip(1) {
         if let Some(end) = arg.strip_prefix("file:") {
+            if seen_file {
+                return Err(Box::new(ParseError::new(
+                    "Cannot specify more than one config file".to_string(),
+                )));
+            }
             config.config_file = Some(PathBuf::from(end));
             config = read_config_file(config)?;
+            seen_file = true;
         }
         if arg == "help" {
             help();
         }
     }
     // then we apply the commandline arguments
+    let mut seen_keys = vec![];
     for arg in args.iter().skip(1) {
         if arg.starts_with("file:") {
             continue;
         }
-        apply_key_value_pair(&mut config, arg)?;
+        let new_key = apply_key_value_pair(&mut config, arg)?;
+        if !new_key.is_empty() {
+            if seen_keys.contains(&new_key) {
+                return Err(Box::new(ParseError::new(format!(
+                    "Repeated key in argument list: {}",
+                    new_key
+                ))));
+            }
+            seen_keys.push(new_key);
+        }
     }
 
     // check the source and target folders exist
@@ -104,8 +123,19 @@ pub fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn Error>> {
 /// Go over the config file and load any key-value pairs into the config struct.
 fn read_config_file(mut config: Config) -> Result<Config, Box<dyn Error>> {
     let contents = fs::read_to_string(config.config_file.clone().unwrap())?;
-    for line in contents.lines() {
-        apply_key_value_pair(&mut config, line)?;
+    let mut seen_keys = vec![];
+    for line in contents.lines().filter(|x| !x.trim().is_empty()) {
+        let new_key = apply_key_value_pair(&mut config, line)?;
+
+        if !new_key.is_empty() {
+            if seen_keys.contains(&new_key) {
+                return Err(Box::new(ParseError::new(format!(
+                    "Repeated key in config file: {}",
+                    new_key
+                ))));
+            }
+            seen_keys.push(new_key);
+        }
     }
     Ok(config)
 }
@@ -113,18 +143,21 @@ fn read_config_file(mut config: Config) -> Result<Config, Box<dyn Error>> {
 /// Read one string composed of key:value (where value is optional) and parse it into the config struct.
 /// For boolean values, not specifying the value will assume TRUE.
 /// For other values, must specify the value after the colon.
-fn apply_key_value_pair(config: &mut Config, line: &str) -> Result<(), Box<dyn Error>> {
+fn apply_key_value_pair(config: &mut Config, line: &str) -> Result<String, Box<dyn Error>> {
     let mut parts = line.split(':');
+    let output;
     if let Some(key) = parts.next() {
+        output = key.trim();
         if let Some(value) = parts.next() {
-            match key.trim() {
-                "source" => config.source = PathBuf::from(value),
-                "target" => config.target = PathBuf::from(value),
+            match output {
+                "source" => config.source = PathBuf::from(value.trim()),
+                "target" => config.target = PathBuf::from(value.trim()),
                 "verbose" => config.verbose = parse_bool(value)?,
                 "dry_run" => config.dry_run = parse_bool(value)?,
                 "move_folders" => config.move_folders = parse_bool(value)?,
                 "sync_files" => config.sync_files = parse_bool(value)?,
                 "delete" => config.delete = parse_bool(value)?,
+                "checksum" => config.checksum = parse_bool(value)?,
                 _ => {
                     return Err(Box::new(ParseError::new(format!(
                         "Invalid key value pair: {}:{}",
@@ -134,7 +167,7 @@ fn apply_key_value_pair(config: &mut Config, line: &str) -> Result<(), Box<dyn E
             }
         } else {
             // "positive approach": have option to specify just the key, and assume value is TRUE if not specified!
-            match key.trim() {
+            match output {
                 "source" => {
                     return Err(Box::new(ParseError::new(
                         "Missing value for source (use source:/path/to/source)".to_string(),
@@ -150,11 +183,14 @@ fn apply_key_value_pair(config: &mut Config, line: &str) -> Result<(), Box<dyn E
                 "move_folders" => config.move_folders = true,
                 "sync_files" => config.sync_files = true,
                 "delete" => config.delete = true,
+                "checksum" => config.checksum = true,
                 _ => return Err(Box::new(ParseError::new(format!("Invalid key: {}", key)))),
             }
         }
+    } else {
+        output = "";
     }
-    Ok(())
+    Ok(output.to_string())
 }
 
 fn check_config_and_folders(config: &Config) -> Result<(), Box<dyn Error>> {
@@ -202,4 +238,299 @@ fn help() {
     println!();
     println!("Default config: {:?}", Config::new());
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static START: Once = Once::new();
+    //Sure to run this once
+    fn setup_tests() {
+        START.call_once(|| {
+            setup_folders();
+            setup_test_files();
+        });
+    }
+
+    fn setup_folders() {
+        println!("Setting up folders for tests...");
+        let mut test_data_dir = std::env::current_dir().unwrap();
+        println!("This is the current directory: {:?}", test_data_dir);
+        test_data_dir.push(PathBuf::from("test_data"));
+        if test_data_dir.is_dir() {
+            let paths = test_data_dir.read_dir().unwrap();
+            for path in paths {
+                if let Ok(path) = path {
+                    if path.file_name() != "SOURCE" && path.file_name() != "TARGET" {
+                        panic!("Cannot empty the test_data dir, it contains files or folders that aren't SOURCE or TARGET");
+                    }
+                }
+            }
+            println!("The data dir contains only SOURCE and TARGET folders, we can clear it!");
+            let _ = std::fs::remove_dir_all(test_data_dir.join("SOURCE"));
+            let _ = std::fs::remove_dir_all(test_data_dir.join("TARGET"));
+        } else if test_data_dir.is_file() {
+            panic!("test_data is a file, not a directory!");
+        } else {
+            std::fs::create_dir(&test_data_dir).unwrap();
+        }
+
+        std::fs::create_dir(test_data_dir.join("SOURCE")).unwrap();
+        std::fs::create_dir(test_data_dir.join("TARGET")).unwrap();
+    }
+
+    fn setup_test_files() {
+        println!(); // TODO: do we need a common setup for all tests?
+    }
+
+    #[test]
+    fn test_parsing_good_arguments() -> Result<(), Box<dyn Error>> {
+        setup_tests();
+        let args = vec![
+            "rusty-sink".to_string(),
+            "source:test_data/SOURCE".to_string(),
+            "target:test_data/TARGET".to_string(),
+            "verbose:true".to_string(),
+            "dry_run:true".to_string(),
+            "move_folders:true".to_string(),
+            "sync_files:true".to_string(),
+            "delete:true".to_string(),
+            "checksum:true".to_string(),
+        ];
+        let config = parse_args(args)?;
+        assert_eq!(config.source, PathBuf::from("test_data/SOURCE"));
+        assert_eq!(config.target, PathBuf::from("test_data/TARGET"));
+        assert_eq!(config.verbose, true);
+        assert_eq!(config.dry_run, true);
+        assert_eq!(config.move_folders, true);
+        assert_eq!(config.sync_files, true);
+        assert_eq!(config.delete, true);
+        assert_eq!(config.checksum, true);
+        Ok(())
+    }
+
+    #[test]
+    fn test_adding_whitespace() -> Result<(), Box<dyn Error>> {
+        setup_tests();
+        let args = vec![
+            " rusty-sink ".to_string(),
+            " source:test_data/SOURCE ".to_string(),
+            " target : test_data/TARGET ".to_string(),
+            "  verbose : true ".to_string(),
+            "   dry_run  :  true  ".to_string(),
+        ];
+        let config = parse_args(args)?;
+        assert_eq!(config.source, PathBuf::from("test_data/SOURCE"));
+        assert_eq!(config.target, PathBuf::from("test_data/TARGET"));
+        assert_eq!(config.verbose, true);
+        assert_eq!(config.dry_run, true);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parsing_different_booleans() -> Result<(), Box<dyn Error>> {
+        setup_tests();
+        let args = vec![
+            "rusty-sink".to_string(),
+            "source:test_data/SOURCE".to_string(),
+            "target:test_data/TARGET".to_string(),
+            "verbose".to_string(),          // no value, should default to true
+            "dry_run:True".to_string(),     // true is true
+            "move_folders:yes".to_string(), // yes is also true
+            "sync_files:FALSE".to_string(), // false is false
+            // deliberately skip "delete" to test default value
+            "checksum:0".to_string(), // parse 0 as false
+        ];
+
+        let config = parse_args(args)?;
+        assert_eq!(config.source, PathBuf::from("test_data/SOURCE"));
+        assert_eq!(config.target, PathBuf::from("test_data/TARGET"));
+        assert_eq!(config.verbose, true);
+        assert_eq!(config.dry_run, true);
+        assert_eq!(config.move_folders, true);
+        assert_eq!(config.sync_files, false);
+        assert_eq!(config.delete, false);
+        assert_eq!(config.checksum, false);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_failure_to_parse_bad_source_target() -> Result<(), Box<dyn Error>> {
+        setup_tests();
+        let args = vec![
+            "rusty-sink".to_string(),
+            "source:test_data/X".to_string(),
+            "target:test_data/TARGET".to_string(),
+        ];
+
+        if let Err(e) = parse_args(args) {
+            assert_eq!(e.to_string(), "Source folder not found: \"test_data/X\"");
+        } else {
+            panic!("Expected an error, but got success!");
+        }
+
+        let args = vec![
+            "rusty-sink".to_string(),
+            "source:test_data/SOURCE".to_string(),
+            "target:test_data/X".to_string(),
+        ];
+
+        if let Err(e) = parse_args(args) {
+            assert_eq!(e.to_string(), "Target folder not found: \"test_data/X\"");
+        } else {
+            panic!("Expected an error, but got success!");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_failure_to_parse_missing_source_target() -> Result<(), Box<dyn Error>> {
+        setup_tests();
+        let args = vec![
+            "rusty-sink".to_string(),
+            "target:test_data/TARGET".to_string(),
+        ];
+
+        if let Err(e) = parse_args(args) {
+            assert_eq!(e.to_string(), "Source folder not specified");
+        } else {
+            panic!("Expected an error, but got success!");
+        }
+
+        let args = vec![
+            "rusty-sink".to_string(),
+            "source:test_data/SOURCE".to_string(),
+        ];
+
+        if let Err(e) = parse_args(args) {
+            assert_eq!(e.to_string(), "Target folder not specified");
+        } else {
+            panic!("Expected an error, but got success!");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_failure_to_parse_boolean_value() -> Result<(), Box<dyn Error>> {
+        setup_tests();
+        let args = vec![
+            "rusty-sink".to_string(),
+            "source:test_data/SOURCE".to_string(),
+            "target:test_data/TARGET".to_string(),
+            "verbose:foobar".to_string(),
+        ];
+
+        if let Err(e) = parse_args(args) {
+            assert_eq!(e.to_string(), "Invalid boolean value foobar");
+        } else {
+            panic!("Expected an error, but got success!");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_failure_to_parse_repeated_option() -> Result<(), Box<dyn Error>> {
+        setup_tests();
+        let args = vec![
+            "rusty-sink".to_string(),
+            "source:test_data/SOURCE".to_string(),
+            "target:test_data/TARGET".to_string(),
+            "verbose:true".to_string(),
+            "verbose:true".to_string(),
+        ];
+
+        if let Err(e) = parse_args(args) {
+            assert_eq!(e.to_string(), "Repeated key in argument list: verbose");
+        } else {
+            panic!("Expected an error, but got success!");
+        }
+
+        Ok(())
+    }
+
+    struct AutoDeleteThisFile {
+        file: PathBuf,
+    }
+
+    impl Drop for AutoDeleteThisFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.file);
+        }
+    }
+
+    #[test]
+    fn test_failure_to_parse_repeated_config_file() -> Result<(), Box<dyn Error>> {
+        setup_tests();
+
+        let mut file = File::create("test_data/configuration_repeated.txt")?;
+        let _autodelete = AutoDeleteThisFile {
+            file: PathBuf::from("test_data/configuration_repeated.txt"),
+        };
+        file.write_all(b"source:test_data/SOURCE\ntarget:test_data/TARGET\nverbose:TRUE\n")?;
+
+        let args = vec![
+            "rusty-sink".to_string(),
+            "file:test_data/configuration_repeated.txt".to_string(),
+            "file:test_data/configuration_repeated.txt".to_string(),
+        ];
+
+        if let Err(e) = parse_args(args) {
+            assert_eq!(e.to_string(), "Cannot specify more than one config file");
+        } else {
+            panic!("Expected an error, but got success!");
+        }
+
+        let mut file = File::create("test_data/configuration_repeated.txt")?;
+        let _autodelete = AutoDeleteThisFile {
+            file: PathBuf::from("test_data/configuration_repeated.txt"),
+        };
+        file.write_all(b"source:test_data/SOURCE\ntarget:test_data/TARGET\nverbose:TRUE\nsource:test_data/SOURCE")?; // added duplicate source line
+
+        let args = vec![
+            "rusty-sink".to_string(),
+            "file:test_data/configuration_repeated.txt".to_string(),
+        ];
+
+        if let Err(e) = parse_args(args) {
+            assert_eq!(e.to_string(), "Repeated key in config file: source");
+        } else {
+            panic!("Expected an error, but got success!");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_config_file() -> Result<(), Box<dyn Error>> {
+        setup_tests();
+        let mut file = File::create("test_data/configuration.txt")?;
+        let _autodelete = AutoDeleteThisFile {
+            file: PathBuf::from("test_data/configuration.txt"),
+        };
+        file.write_all(
+            b" source:test_data/SOURCE \n target : test_data/TARGET \n verbose : TRUE \n \n
+        dry_run: False \n move_folders: 0 \n sync_files: yes \n delete: no \n ",
+        )?;
+
+        let args = vec![
+            "rusty-sink".to_string(),
+            "file:test_data/configuration.txt".to_string(),
+        ];
+        let config = parse_args(args)?;
+        assert_eq!(config.source, PathBuf::from("test_data/SOURCE"));
+        assert_eq!(config.target, PathBuf::from("test_data/TARGET"));
+        assert_eq!(config.verbose, true);
+        assert_eq!(config.dry_run, false);
+        assert_eq!(config.move_folders, false);
+        assert_eq!(config.sync_files, true);
+        assert_eq!(config.delete, false);
+        assert_eq!(config.checksum, true); // this is from the default config
+
+        Ok(())
+    }
 }
