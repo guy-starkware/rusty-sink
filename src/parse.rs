@@ -243,6 +243,9 @@ fn help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+    use std::io::prelude::*;
+    use std::sync::Once;
 
     static START: Once = Once::new();
     //Sure to run this once
