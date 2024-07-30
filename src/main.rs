@@ -26,6 +26,7 @@ struct Config {
     dry_run: bool,
     move_folders: bool,
     sync_files: bool,
+    delete: bool,
 }
 
 impl Default for Config {
@@ -38,6 +39,7 @@ impl Default for Config {
             dry_run: false,
             move_folders: false, // TODO: change this to true when all is ready
             sync_files: false,   // TODO: change this to true when all is ready
+            delete: false,       // TODO: change this to true when all is ready
         }
     }
 }
@@ -91,8 +93,8 @@ fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn Error>> {
     let mut config = Config::new();
     // first we scan for the "file:..." argument, and apply the config file
     for arg in args.iter().skip(1) {
-        if arg.starts_with("file:") {
-            config.config_file = Some(arg[5..].to_string());
+        if let Some(end) = arg.strip_prefix("file:") {
+            config.config_file = Some(end.to_string());
             config = read_config(config)?;
         }
         if arg == "help" {
@@ -133,6 +135,7 @@ fn apply_key_value_pair(config: &mut Config, line: &str) -> Result<(), Box<dyn E
                 "dry_run" => config.dry_run = parse_bool(value)?,
                 "move_folders" => config.move_folders = parse_bool(value)?,
                 "sync_files" => config.sync_files = parse_bool(value)?,
+                "delete" => config.delete = parse_bool(value)?,
                 _ => {
                     return Err(Box::new(ParseError::new(format!(
                         "Invalid key value pair: {}:{}",
@@ -147,6 +150,7 @@ fn apply_key_value_pair(config: &mut Config, line: &str) -> Result<(), Box<dyn E
                 "dry_run" => config.dry_run = true,
                 "move_folders" => config.move_folders = true,
                 "sync_files" => config.sync_files = true,
+                "delete" => config.delete = true,
                 _ => return Err(Box::new(ParseError::new(format!("Invalid key: {}", key)))),
             }
         }
@@ -167,10 +171,10 @@ fn help() {
     println!(" - sync_files:<true|false>     : Will sync any outdated and changed files from source to target. ");
     println!(" - delete: <true|false>        : Will delete (move to LOST+FOUND) any files in target that are not in source. ");
     println!(" - help                        : Show this help message");
-    println!("");
+    println!();
     println!("Note that this will never change the source folder, only the target folder.");
     println!("Note that files or folders not found on source, but found on target, will be moved to LOST+FOUND, if using delete:true.");
-    println!("");
+    println!();
     println!("Default config: {:?}", Config::new());
     std::process::exit(0);
 }
