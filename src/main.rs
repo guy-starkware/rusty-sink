@@ -1,8 +1,7 @@
 use std::env;
-use std::fs;
-use std::fmt;
 use std::error::Error;
-
+use std::fmt;
+use std::fs;
 
 fn main() {
     println!("This is rusty-sink...");
@@ -13,24 +12,20 @@ fn main() {
     if let Err(result) = result {
         eprintln!("{}", result);
         std::process::exit(1);
-    }   
-    else {
+    } else {
         println!("{:?}", result.unwrap());
     }
-
-
 }
 
 #[derive(Debug)]
 struct Config {
     config_file: Option<String>,
-    source: String, 
+    source: String,
     target: String,
     verbose: bool,
     dry_run: bool,
     move_folders: bool,
-    sync_files: bool, 
-
+    sync_files: bool,
 }
 
 impl Default for Config {
@@ -41,8 +36,8 @@ impl Default for Config {
             target: String::from(""),
             verbose: false,
             dry_run: false,
-            move_folders: false,  // TODO: change this to true when all is ready
-            sync_files: false,  // TODO: change this to true when all is ready
+            move_folders: false, // TODO: change this to true when all is ready
+            sync_files: false,   // TODO: change this to true when all is ready
         }
     }
 }
@@ -54,7 +49,7 @@ impl Config {
 }
 
 #[derive(Debug)]
-struct ParseError{
+struct ParseError {
     message: String,
 }
 
@@ -66,7 +61,7 @@ impl ParseError {
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,"{}", self.message)
+        write!(f, "{}", self.message)
     }
 }
 
@@ -76,7 +71,7 @@ impl Error for ParseError {
     }
 }
 
-/// Convert a string to a boolean, using "true", "yes", "on", "1" for true, 
+/// Convert a string to a boolean, using "true", "yes", "on", "1" for true,
 /// and "false", "no", "off", "0" for false.
 /// Cther values will return a ParseError
 fn parse_bool(arg: &str) -> Result<bool, ParseError> {
@@ -87,13 +82,13 @@ fn parse_bool(arg: &str) -> Result<bool, ParseError> {
     }
 }
 
-/// Ingest commandline arguments. If file:path/to/config/file is given 
+/// Ingest commandline arguments. If file:path/to/config/file is given
 /// will first apply the config file, and the OVERWRITE with commandline arguments.
 fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn Error>> {
     if args.len() < 2 {
         help();
     }
-    let mut config = Config::new(); 
+    let mut config = Config::new();
     // first we scan for the "file:..." argument, and apply the config file
     for arg in args.iter().skip(1) {
         if arg.starts_with("file:") {
@@ -126,10 +121,10 @@ fn read_config(mut config: Config) -> Result<Config, Box<dyn Error>> {
 
 /// Read one string composed of key:value (where value is optional) and parse it into the config struct.
 /// For boolean values, not specifying the value will assume TRUE.
-/// For other values, must specify the value after the colon. 
-fn apply_key_value_pair(config: &mut Config, line: &str) -> Result<(), Box<dyn Error>>{
-    let mut parts = line.split(':'); 
-    if let Some(key) = parts.next(){
+/// For other values, must specify the value after the colon.
+fn apply_key_value_pair(config: &mut Config, line: &str) -> Result<(), Box<dyn Error>> {
+    let mut parts = line.split(':');
+    if let Some(key) = parts.next() {
         if let Some(value) = parts.next() {
             match key.trim() {
                 "source" => config.source = value.to_string(),
@@ -138,10 +133,16 @@ fn apply_key_value_pair(config: &mut Config, line: &str) -> Result<(), Box<dyn E
                 "dry_run" => config.dry_run = parse_bool(value)?,
                 "move_folders" => config.move_folders = parse_bool(value)?,
                 "sync_files" => config.sync_files = parse_bool(value)?,
-                _ => return Err(Box::new(ParseError::new(format!("Invalid key value pair: {}:{}", key, value)))),
+                _ => {
+                    return Err(Box::new(ParseError::new(format!(
+                        "Invalid key value pair: {}:{}",
+                        key, value
+                    ))))
+                }
             }
-        } else {  // "positive approach": have option to specify just the key, and assume value is TRUE if not specified! 
-            match key.trim() {  
+        } else {
+            // "positive approach": have option to specify just the key, and assume value is TRUE if not specified!
+            match key.trim() {
                 "verbose" => config.verbose = true,
                 "dry_run" => config.dry_run = true,
                 "move_folders" => config.move_folders = true,
@@ -149,12 +150,11 @@ fn apply_key_value_pair(config: &mut Config, line: &str) -> Result<(), Box<dyn E
                 _ => return Err(Box::new(ParseError::new(format!("Invalid key: {}", key)))),
             }
         }
-        
     }
     Ok(())
 }
 
-/// This is called in cases where no variables are given, or when using the command "help". 
+/// This is called in cases where no variables are given, or when using the command "help".
 fn help() {
     println!("Usage: rusty-sink <command>");
     println!("Commands:");
@@ -169,8 +169,8 @@ fn help() {
     println!(" - help                        : Show this help message");
     println!("");
     println!("Note that this will never change the source folder, only the target folder.");
-    println!("Note that files or folders not found on source, but found on target, will be moved to LOST+FOUND, if using delete:true."); 
+    println!("Note that files or folders not found on source, but found on target, will be moved to LOST+FOUND, if using delete:true.");
     println!("");
     println!("Default config: {:?}", Config::new());
     std::process::exit(0);
-}   
+}
