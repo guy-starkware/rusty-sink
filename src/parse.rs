@@ -3,40 +3,7 @@ use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug)]
-pub struct Config {
-    pub config_file: Option<PathBuf>,
-    pub source: PathBuf,
-    pub target: PathBuf,
-    pub verbose: bool,
-    pub dry_run: bool,
-    pub move_folders: bool,
-    pub sync_files: bool,
-    pub delete: bool,
-    pub checksum: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            config_file: None,
-            source: PathBuf::from(""),
-            target: PathBuf::from(""),
-            verbose: false,
-            dry_run: false,
-            move_folders: false, // TODO: change this to true when all is ready
-            sync_files: false,   // TODO: change this to true when all is ready
-            delete: false,       // TODO: change this to true when all is ready
-            checksum: true,
-        }
-    }
-}
-
-impl Config {
-    fn new() -> Self {
-        Config::default()
-    }
-}
+use super::config::Config;
 
 #[derive(Debug)]
 pub struct ParseError {
@@ -252,7 +219,6 @@ mod tests {
     fn setup_tests() {
         START.call_once(|| {
             setup_folders();
-            setup_test_files();
         });
     }
 
@@ -265,26 +231,21 @@ mod tests {
             let paths = test_data_dir.read_dir().unwrap();
             for path in paths {
                 if let Ok(path) = path {
-                    if path.file_name() != "SOURCE" && path.file_name() != "TARGET" {
+                    if !path.file_name().to_str().unwrap().starts_with("SOURCE")
+                        && !path.file_name().to_str().unwrap().starts_with("TARGET")
+                    {
                         panic!("Cannot empty the test_data dir, it contains files or folders that aren't SOURCE or TARGET");
                     }
                 }
             }
             println!("The data dir contains only SOURCE and TARGET folders, we can clear it!");
-            let _ = std::fs::remove_dir_all(test_data_dir.join("SOURCE"));
-            let _ = std::fs::remove_dir_all(test_data_dir.join("TARGET"));
+            let _ = std::fs::remove_dir_all(&test_data_dir);
         } else if test_data_dir.is_file() {
             panic!("test_data is a file, not a directory!");
-        } else {
-            std::fs::create_dir(&test_data_dir).unwrap();
         }
-
+        std::fs::create_dir(&test_data_dir).unwrap();
         std::fs::create_dir(test_data_dir.join("SOURCE")).unwrap();
         std::fs::create_dir(test_data_dir.join("TARGET")).unwrap();
-    }
-
-    fn setup_test_files() {
-        println!(); // TODO: do we need a common setup for all tests?
     }
 
     #[test]

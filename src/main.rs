@@ -1,7 +1,10 @@
 use std::env;
 
-mod parse;
+pub mod parse;
 use parse::parse_args;
+
+pub mod config;
+pub mod sync;
 
 fn main() {
     println!("This is rusty-sink...");
