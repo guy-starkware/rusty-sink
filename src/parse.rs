@@ -1,12 +1,13 @@
 use std::error::Error;
 use std::fmt;
 use std::fs;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct Config {
-    pub config_file: Option<String>,
-    pub source: String,
-    pub target: String,
+    pub config_file: Option<PathBuf>,
+    pub source: PathBuf,
+    pub target: PathBuf,
     pub verbose: bool,
     pub dry_run: bool,
     pub move_folders: bool,
@@ -18,8 +19,8 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             config_file: None,
-            source: String::from(""),
-            target: String::from(""),
+            source: PathBuf::from(""),
+            target: PathBuf::from(""),
             verbose: false,
             dry_run: false,
             move_folders: false, // TODO: change this to true when all is ready
@@ -79,7 +80,7 @@ pub fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn Error>> {
     // first we scan for the "file:..." argument, and apply the config file
     for arg in args.iter().skip(1) {
         if let Some(end) = arg.strip_prefix("file:") {
-            config.config_file = Some(end.to_string());
+            config.config_file = Some(PathBuf::from(end));
             config = read_config_file(config)?;
         }
         if arg == "help" {
@@ -93,6 +94,9 @@ pub fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn Error>> {
         }
         apply_key_value_pair(&mut config, arg)?;
     }
+
+    // check the source and target folders exist
+    check_config_and_folders(&config)?;
 
     Ok(config)
 }
@@ -114,8 +118,8 @@ fn apply_key_value_pair(config: &mut Config, line: &str) -> Result<(), Box<dyn E
     if let Some(key) = parts.next() {
         if let Some(value) = parts.next() {
             match key.trim() {
-                "source" => config.source = value.to_string(),
-                "target" => config.target = value.to_string(),
+                "source" => config.source = PathBuf::from(value),
+                "target" => config.target = PathBuf::from(value),
                 "verbose" => config.verbose = parse_bool(value)?,
                 "dry_run" => config.dry_run = parse_bool(value)?,
                 "move_folders" => config.move_folders = parse_bool(value)?,
@@ -149,6 +153,32 @@ fn apply_key_value_pair(config: &mut Config, line: &str) -> Result<(), Box<dyn E
                 _ => return Err(Box::new(ParseError::new(format!("Invalid key: {}", key)))),
             }
         }
+    }
+    Ok(())
+}
+
+fn check_config_and_folders(config: &Config) -> Result<(), Box<dyn Error>> {
+    if config.source.to_str().unwrap_or("").is_empty() {
+        return Err(Box::new(ParseError::new(
+            "Source folder not specified".to_string(),
+        )));
+    }
+    if config.target.to_str().unwrap_or("").is_empty() {
+        return Err(Box::new(ParseError::new(
+            "Target folder not specified".to_string(),
+        )));
+    }
+    if !config.source.is_dir() {
+        return Err(Box::new(ParseError::new(format!(
+            "Source folder not found: {:?}",
+            config.source
+        ))));
+    }
+    if !config.target.is_dir() {
+        return Err(Box::new(ParseError::new(format!(
+            "Target folder not found: {:?}",
+            config.target
+        ))));
     }
     Ok(())
 }
