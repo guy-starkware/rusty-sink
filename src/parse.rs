@@ -238,7 +238,7 @@ mod tests {
                     }
                 }
             }
-            println!("The data dir contains only SOURCE and TARGET folders, we can clear it!");
+            // println!("The data dir contains only SOURCE and TARGET folders, we can clear it!");
             let _ = std::fs::remove_dir_all(&test_data_dir);
         } else if test_data_dir.is_file() {
             panic!("test_data is a file, not a directory!");
