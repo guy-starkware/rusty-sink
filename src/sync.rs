@@ -1,11 +1,10 @@
 use chrono::prelude::*;
 
+use super::config::Config;
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::Write;
 use std::path::PathBuf;
-
-use super::config::Config;
 
 #[derive(Debug)]
 struct Folder {
@@ -16,6 +15,29 @@ struct Folder {
     children: Vec<Folder>,
 }
 
+/// gets a path to a folder, and returns a vector of strings with the names of the files or folders
+/// can choose to get either folders or files, or both
+/// returns the vector ordered alphabetically, mixing folders and files
+fn collect_names(
+    path: &PathBuf,
+    folders: bool,
+    files: bool,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut filenames = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if (folders && path.is_dir()) || (files && path.is_file()) {
+            if let Some(path) = path.file_name() {
+                let new_str = path.to_string_lossy().to_string();
+                filenames.push(new_str);
+            }
+        }
+    }
+    filenames.sort();
+    Ok(filenames)
+}
+
 impl Folder {
     fn scan(
         config: &Config,
@@ -23,11 +45,11 @@ impl Folder {
         orphans: &mut HashMap<String, Vec<PathBuf>>,
         widows: &mut HashMap<String, Vec<PathBuf>>,
     ) -> Result<Folder, Box<dyn Error>> {
-        println!("Scanning folder: {:?}", relpath);
+        // println!("Scanning folder: {:?}", relpath);
 
         let mut folder = Folder {
             relpath: relpath.clone(),
-            id: "".to_string(), // this will be overwritten soon
+            id: "".to_string(), // this will be overwritten a little bit later in this function
             is_orphan: !config.source.join(&relpath).is_dir(),
             is_widow: !config.target.join(&relpath).is_dir(),
             children: Vec::new(),
@@ -36,20 +58,12 @@ impl Folder {
         // id of the folder is the contents concatenated
         if !folder.is_orphan {
             // the content of the folder in source is used as identifier
-            let source_children = std::fs::read_dir(config.source.join(&relpath))?;
-            for subpath in source_children {
-                folder
-                    .id
-                    .push_str(&(subpath?.file_name().to_string_lossy().to_string() + ", "));
-            }
+            let source_children = collect_names(&config.source.join(&relpath), true, true)?;
+            folder.id = source_children.join(", ");
         } else {
             // if this folder doesn't exist in the source, use the target content as identifier
-            let target_children = std::fs::read_dir(config.target.join(&relpath))?;
-            for subpath in target_children {
-                folder
-                    .id
-                    .push_str(&(subpath?.file_name().to_string_lossy().to_string() + ", "));
-            }
+            let target_children = collect_names(&config.target.join(&relpath), true, true)?;
+            folder.id = target_children.join(", ");
         }
 
         if folder.is_orphan {
@@ -64,29 +78,20 @@ impl Folder {
                 .push(folder.relpath.clone());
         } else {
             // only in case where this folder exists in both source and target, can we scan its children
-            let source_children = std::fs::read_dir(config.source.join(&relpath))?;
-            let target_children = std::fs::read_dir(config.target.join(&relpath))?;
+            let source_children = collect_names(&config.source.join(&relpath), true, false)?;
+            // println!("Source children: {:?}", source_children);
+            let target_children = collect_names(&config.target.join(&relpath), true, false)?;
+            // println!("Target children: {:?}", target_children);
 
-            // merge the two lists of children, keeping only folders, and only the path relative to the current folder
+            // merge the two lists of children
             let mut children = Vec::new();
             for child in source_children {
-                let child = child?
-                    .path()
-                    .strip_prefix(&config.source.join(&folder.relpath))?
-                    .to_owned();
-                if config.source.join(&relpath).join(&child).is_dir() {
-                    children.push(child);
-                }
+                children.push(child.to_string());
             }
+
             let mut extra_children = Vec::new();
             for child in target_children {
-                let child = child?
-                    .path()
-                    .strip_prefix(&config.target.join(&folder.relpath))?
-                    .to_owned();
-                if config.target.join(&relpath).join(&child).is_dir() {
-                    extra_children.push(child);
-                }
+                extra_children.push(child.to_string());
             }
 
             for child in extra_children {
@@ -94,8 +99,9 @@ impl Folder {
                     children.push(child);
                 }
             }
-            // println!("Children: {:?}", children);
 
+            // println!("Children: {:?}", children);
+            children.sort(); // make sure folders are in alphabetical order
             for child in children {
                 // add the children, but also recursively scan each one
                 folder.children.push(Folder::scan(
@@ -287,9 +293,7 @@ mod tests {
         // println!("{:#?}", root);
 
         assert_eq!(root.relpath, PathBuf::from(""));
-        assert!(root.id.contains("bar"));
-        assert!(root.id.contains("foo"));
-        assert!(root.id.contains("baz"));
+        assert_eq!(root.id, "bar, baz, foo");
         assert!(!root.is_orphan);
         assert!(!root.is_widow);
         assert_eq!(root.children.len(), 3);
@@ -303,18 +307,18 @@ mod tests {
         assert_eq!(root.children[0].children[1].relpath, PathBuf::from("bar/e"));
         assert_eq!(root.children[0].children[2].relpath, PathBuf::from("bar/f"));
 
-        assert_eq!(root.children[1].relpath, PathBuf::from("foo"));
+        assert_eq!(root.children[1].relpath, PathBuf::from("baz"));
         assert!(!root.children[1].is_orphan);
         assert!(!root.children[1].is_widow);
-        assert_eq!(root.children[1].children.len(), 3);
-        assert_eq!(root.children[1].children[0].relpath, PathBuf::from("foo/a"));
-        assert_eq!(root.children[1].children[1].relpath, PathBuf::from("foo/c"));
-        assert_eq!(root.children[1].children[2].relpath, PathBuf::from("foo/b"));
+        assert_eq!(root.children[1].children.len(), 0);
 
-        assert_eq!(root.children[2].relpath, PathBuf::from("baz"));
+        assert_eq!(root.children[2].relpath, PathBuf::from("foo"));
         assert!(!root.children[2].is_orphan);
         assert!(!root.children[2].is_widow);
-        assert_eq!(root.children[2].children.len(), 0);
+        assert_eq!(root.children[2].children.len(), 3);
+        assert_eq!(root.children[2].children[0].relpath, PathBuf::from("foo/a"));
+        assert_eq!(root.children[2].children[1].relpath, PathBuf::from("foo/b"));
+        assert_eq!(root.children[2].children[2].relpath, PathBuf::from("foo/c"));
 
         resources.cleanup = false;
         Ok(())
