@@ -4,7 +4,7 @@ use super::config::Config;
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 struct Folder {
@@ -27,6 +27,9 @@ fn collect_names(
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
         let path = entry.path();
+        if file_to_ignore(&path) {
+            continue;
+        }
         if (folders && path.is_dir()) || (files && path.is_file()) {
             if let Some(path) = path.file_name() {
                 let new_str = path.to_string_lossy().to_string();
@@ -123,7 +126,7 @@ pub fn run(config: &mut Config) -> Result<(), Box<dyn Error>> {
     make_logfile(config)?;
     write_line(config, "Starting scan of both folders...")?;
 
-    let (root, orphans, widows) = scan_trees(config)?;
+    let (_root, orphans, widows) = scan_trees(config)?;
     write_line(
         config,
         &format!(
@@ -138,8 +141,13 @@ pub fn run(config: &mut Config) -> Result<(), Box<dyn Error>> {
         write_line(config, "Done matching and moving orphans. ")?;
     }
 
+    if config.delete {
+        remove_orphans(config, &config.target.clone())?;
+        write_line(config, "Done removing orphans. ")?;
+    }
+
     if config.sync_files {
-        copy_files_and_folders(config, &root)?;
+        copy_files_and_folders(config, &config.source.clone())?;
         write_line(config, "Done copying files. ")?;
     }
 
@@ -166,6 +174,13 @@ fn make_logfile(config: &mut Config) -> Result<(), Box<dyn Error>> {
     writeln!(file, "Configuration: {:?}", config)?;
     config.logfile = Some(file); // make sure to save the open file into the config!
     Ok(())
+}
+
+fn file_to_ignore(path: &Path) -> bool {
+    let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+    //println!("file_name to ignore is {:?}", file_name);
+    file_name.starts_with("RUSTYSINK_LOST_AND_FOUND")
+        || (file_name.starts_with("rustysink_") && file_name.ends_with(".log"))
 }
 
 type ReturnAll = (
@@ -237,79 +252,99 @@ fn move_orphans(
     Ok(())
 }
 
-// copy files and folders from the source to the target, and move any remaining orphans to LOST AND FOUND
-// for each folder that existed in the source and target, will call the sync_files function to
-// check each file and copy it if necessary
-fn copy_files_and_folders(config: &mut Config, folder: &Folder) -> Result<(), Box<dyn Error>> {
-    for child in folder.children.iter() {
-        copy_files_and_folders(config, child)?;
-    }
-
-    // move any remaining orphans to LOST AND FOUND
-    if config.delete && folder.is_orphan && config.target.join(&folder.relpath).exists() {
-        let target = config.lost_and_found_path().join(&folder.relpath);
-        write_line(config, &format!("DELETE: {:?}", folder.relpath))?;
-        if !config.dry_run {
-            std::fs::rename(folder.relpath.clone(), target)?;
+// goes over the target folder recursively and moves to lost and found any folders or files not in the source
+fn remove_orphans(config: &mut Config, path: &PathBuf) -> Result<(), Box<dyn Error>> {
+    for entry in std::fs::read_dir(path)? {
+        let path = entry?.path();
+        if file_to_ignore(&path) {
+            // skip the lost and found and log file
+            continue;
+        }
+        let source_path = config.source.join(path.strip_prefix(&config.target)?);
+        if path.is_dir() && source_path.is_dir() {
+            remove_orphans(config, &path)?; // recursively go into the folder tree
+            continue;
+        }
+        // only reach this part if we didn't go into the folder tree
+        if !source_path.exists() {
+            // if the file or folder doesn't exist in the source, move it from target to LOST AND FOUND
+            write_line(
+                config,
+                &format!("DELETE: {:?}", path.strip_prefix(&config.target)?),
+            )?;
+            if !config.dry_run {
+                std::fs::rename(
+                    &path,
+                    config.lost_and_found_path().join(path.file_name().unwrap()),
+                )?;
+            }
         }
     }
+    Ok(())
+}
 
-    // copy over widows that still don't have a corresponding folder on the target side
-    if folder.is_widow && !config.target.join(&folder.relpath).exists() {
-        let target = config.target.join(&folder.relpath);
-        write_line(config, &format!("COPY: {:?}", folder.relpath))?;
-        if !config.dry_run {
-            std::fs::create_dir_all(target)?;
+// recursively copy files and folders from the source to the target
+// for each folder that exists in the source and target, will call the sync_files function to
+// check each file and copy it if necessary
+fn copy_files_and_folders(config: &mut Config, path: &PathBuf) -> Result<(), Box<dyn Error>> {
+    if config.verbose {
+        println!("Copying files and folders in {:?}", path);
+    }
+    for entry in std::fs::read_dir(path)? {
+        let path = entry?.path();
+        if file_to_ignore(&path) {
+            // skip the lost and found and log file
+            continue;
+        }
+        if path.is_dir() {
+            let target_path = config.target.join(path.strip_prefix(&config.source)?);
+            if !target_path.is_dir() {
+                // if the folder doesn't exist in the target, create it
+                write_line(
+                    config,
+                    &format!("COPY: {:?}", path.strip_prefix(&config.source)?),
+                )?;
+                if !config.dry_run {
+                    std::fs::create_dir_all(target_path)?;
+                }
+            }
+            copy_files_and_folders(config, &path)?; // recursively go into the folder tree
         }
     }
 
     // sync the files in this folder
-    sync_files(config, folder)?;
+    sync_files(config, path)?;
 
     Ok(())
 }
 
 // go over the files in a single folder on source, and copy the ones that are missing or outdated
-fn sync_files(config: &mut Config, folder: &Folder) -> Result<(), Box<dyn Error>> {
-    for file in std::fs::read_dir(config.source.join(&folder.relpath))? {
+fn sync_files(config: &mut Config, folder: &PathBuf) -> Result<(), Box<dyn Error>> {
+    let relpath = folder.strip_prefix(&config.source)?;
+    if config.verbose {
+        println!("Syncing files in {:?}", relpath);
+    }
+    for file in std::fs::read_dir(folder)? {
         let file = file?;
         let path = file.path();
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
         // this function skips folders (they would be treated recursively by the caller)
         if path.is_dir() {
             continue;
         }
 
-        // remove the file from the target if it is an orphan
-        if config.delete && !path.exists() {
-            let target = config
-                .target
-                .join(&folder.relpath)
-                .join(path.file_name().unwrap());
-            let lost_and_found = config.lost_and_found_path().join(&folder.relpath);
-            write_line(config, &format!("DELETE: {:?}", &target))?;
-            if !config.dry_run {
-                std::fs::rename(&target, lost_and_found.join(target.file_name().unwrap()))?;
-            }
-            continue;
-        }
-
         // file exists in source
         if path.is_file() {
-            let target = config
-                .target
-                .join(&folder.relpath)
-                .join(path.file_name().unwrap());
+            let target = config.target.join(relpath).join(&filename);
             if target.exists() {
                 // it exists in the target as well, must check if it needs to be updated
                 if check_need_update(config, &path, &target)? {
                     if config.keep_versions {
-                        let lost_and_found = config.lost_and_found_path().join(&folder.relpath);
-                        write_line(config, &format!("DELETE: {:?}", target))?;
+                        let lost_and_found = config.lost_and_found_path().join(relpath);
+                        write_line(config, &format!("DELETE: {:?}", relpath.join(&filename)))?;
                         if !config.dry_run {
-                            std::fs::rename(
-                                target.clone(),
-                                lost_and_found.join(target.file_name().unwrap()),
-                            )?;
+                            std::fs::create_dir_all(&lost_and_found)?;
+                            std::fs::rename(&target, lost_and_found.join(&filename))?;
                         }
                     }
                 } else {
@@ -318,13 +353,14 @@ fn sync_files(config: &mut Config, folder: &Folder) -> Result<(), Box<dyn Error>
                 }
             } // if the file doesn't exist in the target, we should copy it
 
-            // if we've reached here, without hitting any continues statements, we should copy the file
-            write_line(config, &format!("COPY: {:?}", path))?;
+            // if we've reached here, without hitting any continue statements, we should copy the file
+            write_line(config, &format!("COPY: {:?}", relpath.join(&filename)))?;
             if !config.dry_run {
                 std::fs::copy(path, target)?;
             }
         }
     }
+
     Ok(())
 }
 
@@ -405,7 +441,7 @@ mod tests {
     }
 
     impl TestFoldersAndLog {
-        fn new(config: &Config) -> Result<Self, Box<dyn Error>> {
+        fn new(config: &Config, add_files: bool) -> Result<Self, Box<dyn Error>> {
             let source = config.source.clone();
             let target = config.target.clone();
             let logfile = std::path::PathBuf::from("");
@@ -442,6 +478,45 @@ mod tests {
                 std::fs::create_dir(&subsource.join(subfolder))?;
                 std::fs::create_dir(&subtarget.join(subfolder))?;
             }
+
+            if add_files {
+                // add some fake files in these folders!
+                make_a_file(&config.source.join("foo/a"))?;
+                make_a_file(&config.source.join("foo/b"))?;
+                make_a_file(&config.source.join("foo/c"))?;
+
+                // make multiple files in bar/d
+                make_a_file(&config.source.join("bar/d"))?;
+                make_a_file(&config.source.join("bar/d"))?;
+                make_a_file(&config.source.join("bar/d"))?;
+
+                // make a file in bar/e
+                make_a_file(&config.source.join("bar/e"))?;
+
+                // leave bar/f empty
+
+                // make a file in bar itself
+                make_a_file(&config.source.join("bar"))?;
+
+                // make some different files in the target folder
+                make_a_file(&config.target.join("foo/a"))?;
+                make_a_file(&config.target.join("foo/b"))?;
+                make_a_file(&config.target.join("foo/c"))?;
+
+                // make multiple files in bar/d
+                make_a_file(&config.target.join("bar/d"))?;
+                make_a_file(&config.target.join("bar/d"))?;
+                make_a_file(&config.target.join("bar/d"))?;
+
+                // make a file in bar/e
+                make_a_file(&config.target.join("bar/e"))?;
+
+                // leave bar/f empty
+
+                // make a file in bar itself
+                make_a_file(&config.target.join("bar"))?;
+            }
+
             Ok(Self {
                 logfile,
                 source,
@@ -451,25 +526,42 @@ mod tests {
         }
     }
 
+    fn make_a_file(parent: &PathBuf) -> Result<(), Box<dyn Error>> {
+        let text = random_string();
+        let path = parent.join(format!("test_file_{}.txt", text));
+        let mut file = std::fs::File::create(path)?;
+        writeln!(file, "This is a test file")?;
+        writeln!(file, "The content of the file is: {}", text)?;
+        Ok(())
+    }
+
     /// make a random string, use it to make a config struct, use that to make source/target folders
     /// make sure these folders (and logfile name) are saved to the resources struct
     /// which will cleanup at the end of the test
-    fn setup_resources() -> Result<(Config, TestFoldersAndLog), Box<dyn Error>> {
+    fn setup_resources(add_files: bool) -> Result<(Config, TestFoldersAndLog), Box<dyn Error>> {
         let rand = random_string();
         let config = Config {
             source: std::path::PathBuf::from(format!("test_data/SOURCE_{}", rand)),
             target: std::path::PathBuf::from(format!("test_data/TARGET_{}", rand)),
             ..Default::default()
         };
-        let resources = TestFoldersAndLog::new(&config)?;
+        let resources = TestFoldersAndLog::new(&config, add_files)?;
         Ok((config, resources))
     }
 
-    fn file_to_ignore(path: &PathBuf) -> bool {
-        let file_name = path.file_name().unwrap().to_string_lossy().to_string();
-        //println!("file_name to ignore is {:?}", file_name);
-        file_name.starts_with("RUSTYSINK_LOST_AND_FOUND")
-            || (file_name.starts_with("rustysink_") && file_name.ends_with(".log"))
+    // recursively copies a folder and its contents to a target folder
+    fn copy_folder(source: &PathBuf, target: &PathBuf) -> Result<(), Box<dyn Error>> {
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                std::fs::copy(&path, target.join(path.file_name().unwrap()))?;
+            } else {
+                std::fs::create_dir(target.join(path.file_name().unwrap()))?;
+                copy_folder(&path, &target.join(path.file_name().unwrap()))?;
+            }
+        }
+        Ok(())
     }
 
     /// re-scans both source and target and crashes if there are any differences
@@ -482,7 +574,12 @@ mod tests {
             let src = src.unwrap();
             let src_path = src.path();
             let tgt_path = target_dir.join(src.file_name());
-            assert!(tgt_path.exists());
+
+            assert!(
+                tgt_path.exists(),
+                "File {:?} is missing in target",
+                src_path
+            );
             if src_path.is_dir() {
                 assert_folder_trees_equal(&src_path, &tgt_path);
             } else {
@@ -500,14 +597,18 @@ mod tests {
                 continue;
             }
             let src_path = source_dir.join(tgt.file_name());
-            // println!("Checking: {:?} vs. {:?}", tgt_path, src_path);
-            assert!(src_path.exists()); // any file or folder in target must also exist in source! (no orphans!)
+
+            assert!(
+                src_path.exists(),
+                "File {:?} is missing in source",
+                tgt_path
+            );
         }
     }
 
     #[test]
     fn test_make_folder_and_logfile() -> Result<(), Box<dyn Error>> {
-        let (mut config, mut resources) = setup_resources()?;
+        let (mut config, mut resources) = setup_resources(false)?;
 
         // make a lost and found folder inside the target folder
         make_lost_and_found(&config)?;
@@ -530,7 +631,7 @@ mod tests {
 
     #[test]
     fn test_read_identical_trees() -> Result<(), Box<dyn Error>> {
-        let (config, mut resources) = setup_resources()?;
+        let (config, mut resources) = setup_resources(false)?;
 
         let (root, orphans, widows) = scan_trees(&config)?;
         // println!("{:#?}", root);
@@ -572,7 +673,7 @@ mod tests {
 
     #[test]
     fn test_tree_with_widow() -> Result<(), Box<dyn Error>> {
-        let (config, mut resources) = setup_resources()?;
+        let (config, mut resources) = setup_resources(false)?;
 
         // delete one folder from the source to produce an orphan
         let path = resources.target.join("foo");
@@ -618,7 +719,7 @@ mod tests {
 
     #[test]
     fn test_tree_with_orphan() -> Result<(), Box<dyn Error>> {
-        let (config, mut resources) = setup_resources()?;
+        let (config, mut resources) = setup_resources(false)?;
 
         // delete one folder from the source to produce an orphan
         let path = resources.source.join("foo");
@@ -664,7 +765,7 @@ mod tests {
 
     #[test]
     fn test_fix_moved_folder() -> Result<(), Box<dyn Error>> {
-        let (mut config, mut resources) = setup_resources()?;
+        let (mut config, mut resources) = setup_resources(false)?;
 
         // move one folder from the source to produce an orphan and a widow
         let path = resources.source.join("foo");
@@ -679,30 +780,96 @@ mod tests {
         move_orphans(&mut config, &orphans, &widows)?;
 
         assert_folder_trees_equal(&config.source, &config.target);
-        resources.cleanup = false;
+        resources.cleanup = true; // set this to true to clean up, to false to inspect the folders
         Ok(())
     }
 
     #[test]
     fn test_run_with_moved_folder() -> Result<(), Box<dyn Error>> {
-        let (mut config, mut resources) = setup_resources()?;
+        let (mut config, mut resources) = setup_resources(true)?;
 
         // delete one folder from the source to produce an orphan
-        let path = resources.source.join("foo");
-        std::fs::rename(&path, resources.source.join("baz").join("foo"))?;
+        let source_path = resources.source.join("foo");
+        std::fs::rename(&source_path, resources.source.join("baz").join("foo"))?; // foo is now moved into baz
+        let source_path = resources.source.join("baz").join("foo"); // foo is now moved into baz
+
+        std::fs::remove_dir_all(resources.target.join("foo"))?; // remove foo from target
+        let target_path = resources.target.join("foo"); // foo remains at the same place in target
+        std::fs::create_dir_all(&target_path)?;
+
+        // copy the files from the original source location ("foo") to the new target location ("baz/foo")
+        copy_folder(&source_path, &target_path)?;
 
         // to inspect the logfile later
         make_lost_and_found(&config)?;
         make_logfile(&mut config)?;
 
-        // make sure the config is set to move folders
+        // make sure the config is set to move, copy and delete
         config.move_folders = true;
+        config.sync_files = true;
+        config.delete = true;
 
         // run the sync
         run(&mut config)?;
 
+        // first of all, check that the file trees are the same
         assert_folder_trees_equal(&config.source, &config.target);
-        resources.cleanup = false;
+
+        // then check the logfile to see things happened the way they were supposed to
+        let logfile = std::fs::read_to_string(config.log_file_path())?;
+        assert!(logfile.contains("Found 1 orphans and 1 widows"));
+        assert!(logfile.contains("MOVE: \"foo\" -> \"baz/foo\""));
+        assert!(!logfile.contains("DELETE: \"foo")); // doesn't delete foo or any subfolder
+        assert!(!logfile.contains("COPY: \"foo")); // doesn't copy foo or any subfolder
+        assert!(!logfile.contains("COPY: \"baz/foo")); // doesn't copy baz/foo or any subfolder
+
+        resources.cleanup = true;
         Ok(())
     }
+
+    #[test]
+    fn test_run_with_moved_folder_without_move() -> Result<(), Box<dyn Error>> {
+        let (mut config, mut resources) = setup_resources(true)?;
+
+        // delete one folder from the source to produce an orphan
+        let source_path = resources.source.join("foo");
+        std::fs::rename(&source_path, resources.source.join("baz").join("foo"))?; // foo is now moved into baz
+        let source_path = resources.source.join("baz").join("foo"); // foo is now moved into baz
+
+        std::fs::remove_dir_all(resources.target.join("foo"))?; // remove foo from target
+        let target_path = resources.target.join("foo"); // foo remains at the same place in target
+        std::fs::create_dir_all(&target_path)?;
+
+        // copy the files from the original source location ("foo") to the new target location ("baz/foo")
+        copy_folder(&source_path, &target_path)?;
+
+        // to inspect the logfile later
+        make_lost_and_found(&config)?;
+        make_logfile(&mut config)?;
+
+        // make sure the config is set to move, copy and delete
+        config.move_folders = false;
+        config.sync_files = true;
+        config.delete = true;
+
+        // run the sync
+        run(&mut config)?;
+
+        // first of all, check that the file trees are the same
+        assert_folder_trees_equal(&config.source, &config.target);
+
+        // then check the logfile to see things happened the way they were supposed to
+        let logfile = std::fs::read_to_string(config.log_file_path())?;
+        assert!(logfile.contains("Found 1 orphans and 1 widows"));
+        assert!(!logfile.contains("MOVE: \"foo\" -> \"baz/foo\""));
+        assert!(logfile.contains("DELETE: \"foo")); // doesn't delete foo or any subfolder
+        assert!(logfile.contains("COPY: \"baz/foo")); // doesn't copy foo or any subfolder
+
+        resources.cleanup = true;
+        Ok(())
+    }
+
+    // TODO: test what happens when delete=false (add orphan=false to the check function)
+    // TODO: test what happens when file contents are changed but filenames are the same
+    // TODO: test what happens when checksum is enabled and files are different but have the same size / modified time
 }
