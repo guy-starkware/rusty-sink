@@ -3,17 +3,18 @@ use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct Config {
-    pub config_file: Option<PathBuf>,
-    pub source: PathBuf,
-    pub target: PathBuf,
-    pub verbose: bool,
-    pub dry_run: bool,
-    pub move_folders: bool,
-    pub sync_files: bool,
-    pub delete: bool,
-    pub checksum: bool,
-    pub start_time: String,
-    pub logfile: Option<File>,
+    pub config_file: Option<PathBuf>, // use this to pass arguments from a file (commandline arguments will override this!)
+    pub source: PathBuf,              // path to the source folder (this folder is never touched)
+    pub target: PathBuf, // path to the target folder (this folder is the one that will be modified)
+    pub verbose: bool,   // print each action to the console
+    pub dry_run: bool,   // do not actually move or copy files, just print what would be done
+    pub move_folders: bool, // try to match orphan and widow folders and move them on the target before copying any data
+    pub sync_files: bool,   // copy missing or outdated files and folders from source to target
+    pub delete: bool, // any folders or files that are not in the source (after moving) will be moved to LOST AND FOUND
+    pub keep_versions: bool, // if a file in target exists but is outdated, will keep the old version in LOST AND FOUND
+    pub checksum: bool, // compare files that have a different modified data, using checksums, before deciding to copy a new version
+    pub start_time: String, // timestamp automatically generated when the program starts
+    pub logfile: Option<File>, // logfile pointer generated when the program starts
 }
 
 impl Default for Config {
@@ -24,9 +25,10 @@ impl Default for Config {
             target: PathBuf::from(""),
             verbose: false,
             dry_run: false,
-            move_folders: false, // TODO: change this to true when all is ready
-            sync_files: false,   // TODO: change this to true when all is ready
-            delete: false,       // TODO: change this to true when all is ready
+            move_folders: false,  // TODO: change this to true when all is ready
+            sync_files: false,    // TODO: change this to true when all is ready
+            delete: false,        // TODO: change this to true when all is ready
+            keep_versions: false, // TODO: change this to true when all is ready
             checksum: true,
             start_time: chrono::Local::now().format("%Y%m%dT%H%M%S").to_string(),
             logfile: None,
