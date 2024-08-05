@@ -3,6 +3,7 @@ use chrono::prelude::*;
 use super::config::Config;
 use std::collections::HashMap;
 use std::error::Error;
+//use std::fs::{create_dir, create_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -210,27 +211,17 @@ fn move_orphans(
         // go over orphans
         if let Some(widow_paths) = widows.get(orphan_id) {
             // if there is a widow with the same id
-            for (i, path) in orphan_paths.iter().enumerate() {
+            for (i, orphan_path) in orphan_paths.iter().enumerate() {
                 // can have multiple orphans with the same id
-                let path = config.target.join(path);
+                let orphan_path = config.target.join(orphan_path);
                 if i < widow_paths.len() {
                     // if there are more orphans than widows, we can't match them
-                    let target = config.target.join(&widow_paths[i]);
-                    // println!("Moving orphan: {:?} -> {:?}", path.strip_prefix(&config.target)?, target.strip_prefix(&config.target)?);
+                    let target = config.target.join(&widow_paths[i]); // the path we want to put this orphan in
+                                                                      // println!("Moving orphan: {:?} -> {:?}", orphan_path.strip_prefix(&config.target)?, target.strip_prefix(&config.target)?);
 
                     // check if a folder aleady exists where the move will take place, if so, move that folder to LOST AND FOUND
                     if target.exists() {
-                        let lost_and_found = config.lost_and_found_path();
-                        write_line(
-                            config,
-                            &format!("DELETE: {:?}", target.strip_prefix(&config.target)?),
-                        )?;
-                        if !config.dry_run {
-                            std::fs::rename(
-                                &target,
-                                lost_and_found.join(target.file_name().unwrap()),
-                            )?;
-                        }
+                        delete_file_or_folder(config, &target)?;
                     }
 
                     // move this orphan folder to the corresponding widow folder location
@@ -238,12 +229,12 @@ fn move_orphans(
                         config,
                         &format!(
                             "MOVE: {:?} -> {:?}",
-                            path.strip_prefix(&config.target)?,
+                            orphan_path.strip_prefix(&config.target)?,
                             target.strip_prefix(&config.target)?
                         ),
                     )?;
                     if !config.dry_run {
-                        std::fs::rename(path, target)?;
+                        std::fs::rename(orphan_path, target)?;
                     }
                 }
             }
@@ -255,29 +246,22 @@ fn move_orphans(
 // goes over the target folder recursively and moves to lost and found any folders or files not in the source
 fn remove_orphans(config: &mut Config, path: &PathBuf) -> Result<(), Box<dyn Error>> {
     for entry in std::fs::read_dir(path)? {
-        let path = entry?.path();
-        if file_to_ignore(&path) {
+        let orphan_path = entry?.path();
+        if file_to_ignore(&orphan_path) {
             // skip the lost and found and log file
             continue;
         }
-        let source_path = config.source.join(path.strip_prefix(&config.target)?);
-        if path.is_dir() && source_path.is_dir() {
-            remove_orphans(config, &path)?; // recursively go into the folder tree
+        let source_path = config
+            .source
+            .join(orphan_path.strip_prefix(&config.target)?);
+        if orphan_path.is_dir() && source_path.is_dir() {
+            remove_orphans(config, &orphan_path)?; // recursively go into the folder tree
             continue;
         }
         // only reach this part if we didn't go into the folder tree
         if !source_path.exists() {
             // if the file or folder doesn't exist in the source, move it from target to LOST AND FOUND
-            write_line(
-                config,
-                &format!("DELETE: {:?}", path.strip_prefix(&config.target)?),
-            )?;
-            if !config.dry_run {
-                std::fs::rename(
-                    &path,
-                    config.lost_and_found_path().join(path.file_name().unwrap()),
-                )?;
-            }
+            delete_file_or_folder(config, &orphan_path)?;
         }
     }
     Ok(())
@@ -340,12 +324,7 @@ fn sync_files(config: &mut Config, folder: &PathBuf) -> Result<(), Box<dyn Error
                 // it exists in the target as well, must check if it needs to be updated
                 if check_need_update(config, &path, &target)? {
                     if config.keep_versions {
-                        let lost_and_found = config.lost_and_found_path().join(relpath);
-                        write_line(config, &format!("DELETE: {:?}", relpath.join(&filename)))?;
-                        if !config.dry_run {
-                            std::fs::create_dir_all(&lost_and_found)?;
-                            std::fs::rename(&target, lost_and_found.join(&filename))?;
-                        }
+                        delete_file_or_folder(config, &target)?;
                     }
                 } else {
                     // if the files are the same, can skip the copy operation below
@@ -361,6 +340,31 @@ fn sync_files(config: &mut Config, folder: &PathBuf) -> Result<(), Box<dyn Error
         }
     }
 
+    Ok(())
+}
+// move the file or folder in "path" to the lost and found folder, including the path relative to the target folder
+
+fn delete_file_or_folder(config: &mut Config, path: &PathBuf) -> Result<(), Box<dyn Error>> {
+    write_line(
+        config,
+        &format!("DELETE: {:?}", path.strip_prefix(&config.target)?),
+    )?;
+    if !config.dry_run {
+        // create the path to the moved file inside lost and found
+        let lost_and_found = config.lost_and_found_path();
+        let relpath = path.strip_prefix(&config.target)?;
+        if path.is_file() {
+            if let Some(path_parent) = relpath.parent() {
+                std::fs::create_dir_all(lost_and_found.join(path_parent))?;
+            }
+        }
+        if path.is_dir() {
+            std::fs::create_dir_all(lost_and_found.join(relpath))?
+        }
+
+        // do the actual move
+        std::fs::rename(path, lost_and_found.join(relpath))?;
+    }
     Ok(())
 }
 
@@ -565,11 +569,13 @@ mod tests {
     }
 
     /// re-scans both source and target and crashes if there are any differences
-    fn assert_folder_trees_equal(source_dir: &PathBuf, target_dir: &PathBuf) {
+    fn assert_folder_trees_equal(source_dir: &PathBuf, target_dir: &PathBuf, check_orphans: bool) {
         if file_to_ignore(&target_dir) {
+            // skip this file if it is on the ignore list
             return;
         }
 
+        // check all files in the source directory have been successfully copied to the target directory
         for src in std::fs::read_dir(&source_dir).unwrap() {
             let src = src.unwrap();
             let src_path = src.path();
@@ -581,7 +587,7 @@ mod tests {
                 src_path
             );
             if src_path.is_dir() {
-                assert_folder_trees_equal(&src_path, &tgt_path);
+                assert_folder_trees_equal(&src_path, &tgt_path, check_orphans);
             } else {
                 assert!(tgt_path.is_file());
                 // check the file md5 checksum is the same
@@ -590,19 +596,23 @@ mod tests {
                 assert_eq!(src_md5, tgt_md5);
             }
         }
-        for tgt in std::fs::read_dir(&target_dir).unwrap() {
-            let tgt = tgt.unwrap();
-            let tgt_path = tgt.path();
-            if file_to_ignore(&tgt_path) {
-                continue;
-            }
-            let src_path = source_dir.join(tgt.file_name());
 
-            assert!(
-                src_path.exists(),
-                "File {:?} is missing in source",
-                tgt_path
-            );
+        // check all the files in the target directory are in the source directory (check against remaining orphans)
+        if check_orphans {
+            for tgt in std::fs::read_dir(&target_dir).unwrap() {
+                let tgt = tgt.unwrap();
+                let tgt_path = tgt.path();
+                if file_to_ignore(&tgt_path) {
+                    continue;
+                }
+                let src_path = source_dir.join(tgt.file_name());
+
+                assert!(
+                    src_path.exists(),
+                    "File {:?} is missing in source",
+                    tgt_path
+                );
+            }
         }
     }
 
@@ -779,7 +789,7 @@ mod tests {
         let (_root, orphans, widows) = scan_trees(&config)?;
         move_orphans(&mut config, &orphans, &widows)?;
 
-        assert_folder_trees_equal(&config.source, &config.target);
+        assert_folder_trees_equal(&config.source, &config.target, true);
         resources.cleanup = true; // set this to true to clean up, to false to inspect the folders
         Ok(())
     }
@@ -787,6 +797,16 @@ mod tests {
     #[test]
     fn test_run_with_moved_folder() -> Result<(), Box<dyn Error>> {
         let (mut config, mut resources) = setup_resources(true)?;
+        let mut orphans = vec![]; // we do not include "foo" as we will move it, not delete it
+        for subfolder in ["bar", "bar/d", "bar/e"] {
+            for entry in std::fs::read_dir(resources.target.join(subfolder))? {
+                let path = entry.unwrap().path();
+                if path.is_file() {
+                    let ending = path.strip_prefix(&resources.target).unwrap();
+                    orphans.push(ending.to_string_lossy().to_string());
+                }
+            }
+        }
 
         // delete one folder from the source to produce an orphan
         let source_path = resources.source.join("foo");
@@ -813,7 +833,7 @@ mod tests {
         run(&mut config)?;
 
         // first of all, check that the file trees are the same
-        assert_folder_trees_equal(&config.source, &config.target);
+        assert_folder_trees_equal(&config.source, &config.target, true);
 
         // then check the logfile to see things happened the way they were supposed to
         let logfile = std::fs::read_to_string(config.log_file_path())?;
@@ -823,13 +843,30 @@ mod tests {
         assert!(!logfile.contains("COPY: \"foo")); // doesn't copy foo or any subfolder
         assert!(!logfile.contains("COPY: \"baz/foo")); // doesn't copy baz/foo or any subfolder
 
-        resources.cleanup = true;
+        // check the deleted files ended up in the lost and found folder (in the correct subfolder!)
+        let lost_and_found = config.lost_and_found_path();
+        for orphan in orphans {
+            // println!("{:?}", lost_and_found.join(&orphan));
+            assert!(lost_and_found.join(&orphan).exists());
+        }
+
+        resources.cleanup = true; // set this to true to clean up, to false to inspect the folders
         Ok(())
     }
 
     #[test]
     fn test_run_with_moved_folder_without_move() -> Result<(), Box<dyn Error>> {
         let (mut config, mut resources) = setup_resources(true)?;
+        let mut orphans = vec!["foo".to_string()];
+        for subfolder in ["bar", "bar/d", "bar/e"] {
+            for entry in std::fs::read_dir(resources.target.join(subfolder))? {
+                let path = entry.unwrap().path();
+                if path.is_file() {
+                    let ending = path.strip_prefix(&resources.target).unwrap();
+                    orphans.push(ending.to_string_lossy().to_string());
+                }
+            }
+        }
 
         // delete one folder from the source to produce an orphan
         let source_path = resources.source.join("foo");
@@ -856,20 +893,83 @@ mod tests {
         run(&mut config)?;
 
         // first of all, check that the file trees are the same
-        assert_folder_trees_equal(&config.source, &config.target);
+        assert_folder_trees_equal(&config.source, &config.target, true);
 
         // then check the logfile to see things happened the way they were supposed to
         let logfile = std::fs::read_to_string(config.log_file_path())?;
         assert!(logfile.contains("Found 1 orphans and 1 widows"));
         assert!(!logfile.contains("MOVE: \"foo\" -> \"baz/foo\""));
-        assert!(logfile.contains("DELETE: \"foo")); // doesn't delete foo or any subfolder
-        assert!(logfile.contains("COPY: \"baz/foo")); // doesn't copy foo or any subfolder
+        assert!(logfile.contains("DELETE: \"foo")); // does delete foo or a subfolder
+        assert!(logfile.contains("COPY: \"baz/foo")); // does copy foo inside baz
 
-        resources.cleanup = true;
+        // check the deleted files ended up in the lost and found folder (in the correct subfolder!)
+        let lost_and_found = config.lost_and_found_path();
+        for orphan in orphans {
+            // println!("{:?}", lost_and_found.join(&orphan));
+            assert!(lost_and_found.join(&orphan).exists());
+        }
+
+        resources.cleanup = true; // set this to true to clean up, to false to inspect the folders
         Ok(())
     }
 
-    // TODO: test what happens when delete=false (add orphan=false to the check function)
+    // TODO: test what happens when delete=false (add orphans=false to the check function)
+    #[test]
+    fn test_run_without_delete() -> Result<(), Box<dyn Error>> {
+        let (mut config, mut resources) = setup_resources(true)?;
+        let mut orphans = vec![]; // we don't include "foo" because it is moved and doesn't get left behind as orphan
+        for subfolder in ["bar", "bar/d", "bar/e"] {
+            for entry in std::fs::read_dir(resources.target.join(subfolder))? {
+                let path = entry.unwrap().path();
+                if path.is_file() {
+                    let ending = path.strip_prefix(&resources.target).unwrap();
+                    orphans.push(ending.to_string_lossy().to_string());
+                }
+            }
+        }
+
+        // delete one folder from the source to produce an orphan
+        let source_path = resources.source.join("foo");
+        std::fs::rename(&source_path, resources.source.join("baz").join("foo"))?; // foo is now moved into baz
+        let source_path = resources.source.join("baz").join("foo"); // foo is now moved into baz
+
+        std::fs::remove_dir_all(resources.target.join("foo"))?; // remove foo from target
+        let target_path = resources.target.join("foo"); // foo remains at the same place in target
+        std::fs::create_dir_all(&target_path)?;
+
+        // copy the files from the original source location ("foo") to the new target location ("baz/foo")
+        copy_folder(&source_path, &target_path)?;
+
+        // to inspect the logfile later
+        make_lost_and_found(&config)?;
+        make_logfile(&mut config)?;
+
+        // make sure the config is set to move, copy but NOT delete
+        config.move_folders = true;
+        config.sync_files = true;
+        config.delete = false;
+
+        // run the sync
+        run(&mut config)?;
+
+        // first of all, check that the file trees are the same
+        assert_folder_trees_equal(&config.source, &config.target, false);
+
+        // then check the logfile to see things happened the way they were supposed to
+        let logfile = std::fs::read_to_string(config.log_file_path())?;
+        assert!(logfile.contains("Found 1 orphans and 1 widows"));
+        assert!(logfile.contains("MOVE: \"foo\" -> \"baz/foo\""));
+
+        // check that the orphan files remain where they were
+        for orphan in orphans {
+            // println!("{:?}", config.target.join(&orphan));
+            assert!(config.target.join(&orphan).exists());
+        }
+
+        resources.cleanup = true; // set this to true to clean up, to false to inspect the folders
+        Ok(())
+    }
+
     // TODO: test what happens when file contents are changed but filenames are the same
     // TODO: test what happens when checksum is enabled and files are different but have the same size / modified time
 }
