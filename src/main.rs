@@ -12,10 +12,17 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     let result = parse_args(args);
-    if let Err(result) = result {
-        eprintln!("{}", result);
-        std::process::exit(1);
-    } else {
-        println!("{:?}", result.unwrap());
+    match result {
+        Err(err) => {
+            eprintln!("{}", err);
+            std::process::exit(1); 
+        }
+        Ok(mut config) => {
+            let output = sync::run(&mut config);
+            if let Err(output) = output {
+                eprintln!("{}", output);
+                std::process::exit(1);
+            }
+        }
     }
 }
