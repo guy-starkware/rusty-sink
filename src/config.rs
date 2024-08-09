@@ -25,10 +25,10 @@ impl Default for Config {
             target: PathBuf::from(""),
             verbose: false,
             dry_run: false,
-            move_folders: false,  // TODO: change this to true when all is ready
-            sync_files: false,    // TODO: change this to true when all is ready
-            delete: false,        // TODO: change this to true when all is ready
-            keep_versions: false, // TODO: change this to true when all is ready
+            move_folders: true,
+            sync_files: true,
+            delete: true,
+            keep_versions: true,
             checksum: true,
             start_time: chrono::Local::now().format("%Y%m%dT%H%M%S").to_string(),
             logfile: None,
