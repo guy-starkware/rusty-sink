@@ -3,7 +3,6 @@ use chrono::prelude::*;
 use super::config::Config;
 use std::collections::HashMap;
 use std::error::Error;
-//use std::fs::{create_dir, create_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -396,6 +395,7 @@ fn check_need_update(
         }
     }
 
+    // if all the above conditions don't come true, then return false (no need to update)
     Ok(false)
 }
 
