@@ -29,7 +29,7 @@ impl Default for Config {
             sync_files: true,
             delete: true,
             keep_versions: true,
-            checksum: true,
+            checksum: false,
             start_time: chrono::Local::now().format("%Y%m%dT%H%M%S").to_string(),
             logfile: None,
         }

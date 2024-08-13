@@ -15,7 +15,7 @@ fn main() {
     match result {
         Err(err) => {
             eprintln!("{}", err);
-            std::process::exit(1); 
+            std::process::exit(1);
         }
         Ok(mut config) => {
             let output = sync::run(&mut config);

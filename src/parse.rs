@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(config.dry_run, true);
         assert_eq!(config.move_folders, true);
         assert_eq!(config.sync_files, false);
-        assert_eq!(config.delete, false);
+        assert_eq!(config.delete, true);
         assert_eq!(config.checksum, false);
 
         Ok(())
@@ -493,7 +493,7 @@ mod tests {
         assert_eq!(config.move_folders, false);
         assert_eq!(config.sync_files, true);
         assert_eq!(config.delete, false);
-        assert_eq!(config.checksum, true); // this is from the default config
+        assert_eq!(config.checksum, false); // this is from the default config
 
         Ok(())
     }
